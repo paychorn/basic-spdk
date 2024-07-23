@@ -36,6 +36,11 @@ void attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid, struct s
 void cleanup(void);
 void read_complete(void *arg, const struct spdk_nvme_cpl *completion);
 void write_complete(void *arg, const struct spdk_nvme_cpl *completion);
+int pos_int_input(void);
+int sel_pattern(void);
+uint64_t llu_input(void);
+
+
 
 
 
