@@ -13,7 +13,7 @@ spdk_test.o: spdk_test.c /home/user/proj/spdk/include/spdk/stdinc.h \
  /home/user/proj/spdk/include/spdk/config.h \
  /home/user/proj/spdk/include/spdk/nvme_zns.h \
  /home/user/proj/spdk/include/spdk/string.h \
- /home/user/proj/spdk/include/spdk/log.h spdk_nvme.h
+ /home/user/proj/spdk/include/spdk/log.h spdk_nvme.c spdk_nvme.h
 /home/user/proj/spdk/include/spdk/stdinc.h:
 /home/user/proj/spdk/include/spdk/nvme.h:
 /home/user/proj/spdk/include/spdk/env.h:
@@ -30,4 +30,5 @@ spdk_test.o: spdk_test.c /home/user/proj/spdk/include/spdk/stdinc.h \
 /home/user/proj/spdk/include/spdk/nvme_zns.h:
 /home/user/proj/spdk/include/spdk/string.h:
 /home/user/proj/spdk/include/spdk/log.h:
+spdk_nvme.c:
 spdk_nvme.h:

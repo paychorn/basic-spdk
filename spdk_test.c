@@ -30,8 +30,7 @@
  *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-#include <stdio.h>
-#include <stdlib.h>
+
 #include "spdk/stdinc.h"
 
 #include "spdk/nvme.h"
@@ -42,99 +41,20 @@
 #include "spdk/string.h"
 #include "spdk/log.h"
 
-#include "spdk_nvme.h"
+#include "spdk_nvme.c"
+
 
 
 /* Limitation:
  * 1. Only one namespace is supported.
  * 2. Only one controller is supported.
- * 3. 
  */
-
-/* input */
-static uint64_t user_sector_start = 59392;
-static uint64_t user_sector_count = 1024;
-static size_t user_buffer_size = 512 * 1024;
-static int user_pattern = -1; //read
-static uint64_t user_qdepth = 64;
-static uint64_t max_sector_count = 1;
-
 /* define */
-#define KNRM  "\x1B[0m"
-#define KRED  "\x1B[31m"
-#define MEM_SIZE ((uint64_t)1ULL  << 40) // 1TBs
-// #define BUF_SIZE 4294967296 // 4GB
-void reset_zone_complete(void *arg, const struct spdk_nvme_cpl *completion)
-{
-	struct sequence *sequence = arg;
-
-	/* Assume the I/O was successful */
-	sequence->is_completed = 1;
-	/* See if an error occurred. If so, display information  about it, and set completion value so that I/O caller is aware that an error occurred. */
-	if (spdk_nvme_cpl_is_error(completion)) {
-		spdk_nvme_qpair_print_completion(sequence->ns_entry->qpair, (struct spdk_nvme_cpl *)completion);
-		fprintf(stderr, "I/O error status: %s\n", spdk_nvme_cpl_get_status_string(&completion->status));
-		fprintf(stderr, "Reset zone I/O failed, aborting run\n");
-		sequence->is_completed = 2;
-		exit(1);
-	}
-}
-
-void reset_zone_and_wait_for_completion(struct sequence *sequence)
-{
-	if (spdk_nvme_zns_reset_zone(sequence->ns_entry->ns, sequence->ns_entry->qpair,
-				     0, /* starting LBA of the zone to reset */
-				     false, /* don't reset all zones */
-				     reset_zone_complete,
-				     sequence)) {
-		fprintf(stderr, "starting reset zone I/O failed\n");
-		exit(1);
-	}
-	while (!sequence->is_completed) {
-		spdk_nvme_qpair_process_completions(sequence->ns_entry->qpair, 0);
-	}
-	sequence->is_completed = 0; // Reset for next I/O
-}
-
-void get_info(struct spdk_nvme_ns *ns)
-{
-	max_sector_count = spdk_nvme_ns_get_num_sectors(ns);
-	uint32_t sector_size = spdk_nvme_ns_get_sector_size(ns);
-	uint64_t size_in_bytes = max_sector_count * sector_size;
-
-	printf("Namespace ID: %d\n", spdk_nvme_ns_get_id(ns));
-	printf("Number of Sectors: %lu\n", max_sector_count);
-	printf("Sector Size: %u bytes\n", sector_size);
-	printf("Namespace Size: %lu bytes %.2f GB\n", size_in_bytes, (float)size_in_bytes / (1024 * 1024 * 1024));
-	return;
-}
 
 TAILQ_HEAD(g_ctrs, ctrlr_entry) g_controllers = TAILQ_HEAD_INITIALIZER(g_controllers);
 TAILQ_HEAD(g_nsps, ns_entry) g_namespaces     = TAILQ_HEAD_INITIALIZER(g_namespaces);
 
 /* usage */
-
-static uint64_t lba_count = 0;
-uint64_t get_lba_current(uint64_t lba_start, size_t buffer_sz) {
-    return lba_start + (lba_count++ * buffer_sz);
-}
-
-void usage(const char *program_name)
-{
-	printf("%s [options]", program_name);
-	printf("\t\n");
-	printf("options:\n");
-	printf("\t[-d DPDK huge memory size in MB]\n");
-	printf("\t[-g use single file descriptor for DPDK memory segments]\n");
-	printf("\t[-i shared memory group ID]\n");
-	printf("\t[-r remote NVMe over Fabrics target address]\n");
-	printf("\t[-V enumerate VMD]\n");
-#ifdef DEBUG
-	printf("\t[-L enable debug logging]\n");
-#else
-	printf("\t[-L enable debug logging (flag disabled, must reconfigure with --enable-debug)\n");
-#endif
-}
 
 int parse_args(int argc, char **argv, struct spdk_env_opts *env_opts)
 {
@@ -190,6 +110,28 @@ int parse_args(int argc, char **argv, struct spdk_env_opts *env_opts)
 	return 0;
 }
 
+void cleanup(void)
+{
+	struct ns_entry *ns_entry, *tmp_ns_entry;
+	struct ctrlr_entry *ctrlr_entry, *tmp_ctrlr_entry;
+	struct spdk_nvme_detach_ctx *detach_ctx = NULL;
+
+	TAILQ_FOREACH_SAFE(ns_entry, &g_namespaces, link, tmp_ns_entry) {
+		TAILQ_REMOVE(&g_namespaces, ns_entry, link);
+		free(ns_entry);
+	}
+
+	TAILQ_FOREACH_SAFE(ctrlr_entry, &g_controllers, link, tmp_ctrlr_entry) {
+		TAILQ_REMOVE(&g_controllers, ctrlr_entry, link);
+		spdk_nvme_detach_async(ctrlr_entry->ctrlr, &detach_ctx);
+		free(ctrlr_entry);
+	}
+
+	if (detach_ctx) {
+		spdk_nvme_detach_poll(detach_ctx);
+	}
+}
+
 /* set up namespace */
 void register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 {
@@ -207,14 +149,16 @@ void register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 	entry->ctrlr = ctrlr;
 	entry->ns = ns;
 	TAILQ_INSERT_TAIL(&g_namespaces, entry, link);
-	get_info(ns);
-	// printf("Namespace ID: %d size: %juGB\n", spdk_nvme_ns_get_id(ns, spdk_nvme_ns_get_size(ns) / 1000000000));
+
+	return;
 }
+
 bool probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid, struct spdk_nvme_ctrlr_opts *opts)
 {
 	printf("Attaching to %s\n", trid->traddr);
 	return true;
 }
+
 void attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid, struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_ctrlr_opts *opts)
 {
 	int nsid;
@@ -258,27 +202,6 @@ void attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid, struct s
 	}
 }
 
-void cleanup(void)
-{
-	struct ns_entry *ns_entry, *tmp_ns_entry;
-	struct ctrlr_entry *ctrlr_entry, *tmp_ctrlr_entry;
-	struct spdk_nvme_detach_ctx *detach_ctx = NULL;
-
-	TAILQ_FOREACH_SAFE(ns_entry, &g_namespaces, link, tmp_ns_entry) {
-		TAILQ_REMOVE(&g_namespaces, ns_entry, link);
-		free(ns_entry);
-	}
-
-	TAILQ_FOREACH_SAFE(ctrlr_entry, &g_controllers, link, tmp_ctrlr_entry) {
-		TAILQ_REMOVE(&g_controllers, ctrlr_entry, link);
-		spdk_nvme_detach_async(ctrlr_entry->ctrlr, &detach_ctx);
-		free(ctrlr_entry);
-	}
-
-	if (detach_ctx) {
-		spdk_nvme_detach_poll(detach_ctx);
-	}
-}
 
 void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 {
@@ -286,10 +209,11 @@ void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 
 	/* Assume the I/O was successful */
 	sequence->is_completed = 1;
-	/* See if an error occurred. If so, display information
-	 * about it, and set completion value so that I/O
-	 * caller is aware that an error occurred.
-	 */
+
+	// /* See if an error occurred. If so, display information
+	//  * about it, and set completion value so that I/O
+	//  * caller is aware that an error occurred.
+	//  */
 	if (spdk_nvme_cpl_is_error(completion)) {
 		spdk_nvme_qpair_print_completion(sequence->ns_entry->qpair, (struct spdk_nvme_cpl *)completion);
 		fprintf(stderr, "I/O error status: %s\n", spdk_nvme_cpl_get_status_string(&completion->status));
@@ -304,19 +228,21 @@ void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 	 *  completed.  This will trigger the hello_world() function
 	 *  to exit its polling loop.
 	 */
-	printf("read: %s\n", sequence->buf);
+	// printf("read: %s\n", sequence->buf);
 	spdk_free(sequence->buf);
 }
 
 void write_complete(void *arg, const struct spdk_nvme_cpl *completion)
 {
-	struct sequence	*sequence = arg;
+	struct sequence				*sequence = arg;
 	struct ns_entry			    *ns_entry = sequence->ns_entry;
 
 	/* See if an error occurred. If so, display information
 	 * about it, and set completion value so that I/O
 	 * caller is aware that an error occurred.
 	 */
+	sequence->is_completed = 1;
+	
 	if (spdk_nvme_cpl_is_error(completion)) {
 		spdk_nvme_qpair_print_completion(sequence->ns_entry->qpair, (struct spdk_nvme_cpl *)completion);
 		fprintf(stderr, "I/O error status: %s\n", spdk_nvme_cpl_get_status_string(&completion->status));
@@ -334,220 +260,324 @@ void write_complete(void *arg, const struct spdk_nvme_cpl *completion)
 	} else {
 		spdk_free(sequence->buf);
 	}
-	
-	// int				            rc;
-	// sequence->buf = spdk_zmalloc(buffer_sz, buffer_sz, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-    // uint32_t sys_lba_size = spdk_nvme_ns_get_sector_size(ns_entry->ns);
-    // uint32_t lba_num = buffer_sz/sys_lba_size;
-	// rc = spdk_nvme_ns_cmd_read(ns_entry->ns, ns_entry->qpair, sequence->buf,
-	// 			   user_sector_start, /* LBA start */
-	// 			   lba_num, /* number of LBAs */
-	// 			   read_complete, (void *)sequence, 0);
-	// if (rc != 0) {
-	// 	fprintf(stderr, "starting read I/O failed\n");
-	// 	exit(1);
-	// }
 }
 
-// void spdk_write(void)
-// {
-// 	struct ns_entry			    *ns_entry;
-// 	struct sequence	            sequence;
-// 	int				            rc;
-//     int                         offset;
-// 	size_t				        sz;
+void spdk_write(
+	uint64_t 							user_sector_start,
+	uint64_t 							user_sector_count,
+	size_t 								user_buffer_size,
+	int 								user_pattern
+)
+{
+	struct ns_entry 					*ns_entry;
+    struct sequence 					sequence;
+    int 								rc;
+	uint32_t 							buffer[user_buffer_size];
+	
 
-// 	TAILQ_FOREACH(ns_entry, &g_namespaces, link) {
+	/* generate buffer as pattern 
+	 * 0: fill zeroes, 1: fill ones, 2: increment
+	 */
+	if (user_pattern == 2) {
+		for (size_t i = 0; i < user_buffer_size - 1; i++) {
+			buffer[i] = (user_sector_start + i);
+		}
+	}
+	else {
+		for (size_t i = 0; i < user_buffer_size - 1; i++) {
+			buffer[i] = (uint32_t)user_pattern;
+		}
+	}
+	buffer[user_buffer_size - 1] = '\0'; // Null-terminate the string for safety
 
-// 		ns_entry->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_entry->ctrlr, NULL, 0);
-// 		if (ns_entry->qpair == NULL) {
-// 			printf("ERROR: spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
-// 			return;
-// 		}
-// 		sequence.using_cmb_io = 1;
-// 		sequence.buf = spdk_nvme_ctrlr_map_cmb(ns_entry->ctrlr, &sz);
-// 		if (sequence.buf == NULL || sz < buffer_sz) {
-// 			sequence.using_cmb_io = 0;
-// 			sequence.buf = spdk_zmalloc(buffer_sz, buffer_sz, NULL, 
-//             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-// 		}
-// 		if (sequence.buf == NULL) {
-// 			printf("ERROR: write buffer allocation failed\n");
-// 			return;
-// 		}
-// 		if (sequence.using_cmb_io) {
-// 			printf("INFO: using controller memory buffer for IO\n");
-// 		} else {
-// 			printf("INFO: using host memory buffer for IO\n");
-// 		}
-// 		sequence.is_completed = 0;
-// 		sequence.ns_entry = ns_entry;
-// 		if (spdk_nvme_ns_get_csi(ns_entry->ns) == SPDK_NVME_CSI_ZNS) {
-// 			reset_zone_and_wait_for_completion(&sequence);
-// 		}
+	uint32_t *ptr = buffer;
 
-//         /* Write from file to buffer 
-//          * Open the file then read and print the file contents
-//          */
-//         //// FILE *file;
-//         // char buffer[get_buffer_sz()];
-//         // size_t bytesRead;
-//         // file = fopen("4k_text.txt", "r");
-//         // if (file == NULL) {
-//         //     perror("Error opening file");
-//         //     return;
-//         // }
-//         // while ((bytesRead = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-//         //     fwrite(buffer, 1, bytesRead, stdout);
-//         // }
-//         // Close the file
-//         // fclose(file);
-        
-//         char buffer[buffer_sz];
-//         for (int i = 0; i < buffer_sz - 1; i++) {
-//             buffer[i] = 'C'; // Use 'A' for simplicity
-//         }
-//         buffer[buffer_sz - 1] = '\0'; // Null-terminate the string for safety
-        
-//         /* Check the LBA size */
-//         uint32_t sys_lba_size = spdk_nvme_ns_get_sector_size(ns_entry->ns);
-//         uint32_t lba_num = buffer_sz/sys_lba_size;
+	for (size_t i = 0; i < user_buffer_size - 1; i++) {
+		printf("%d ", *(ptr + i));
+	}
 
-//         snprintf(sequence.buf, buffer_sz, "%s", buffer);
+    TAILQ_FOREACH(ns_entry, &g_namespaces, link) {
+		uint64_t current_sector = user_sector_start;		
+		uint64_t end_sector = user_sector_start + user_sector_count;
 
-//         rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, sequence.buf,
-// 					    user_sector_start, /* LBA start */
-// 					    floor(lba_num), /* number of LBAs */
-// 					    write_complete, &sequence, 0);
-//         if (rc != 0) {
-//             fprintf(stderr, "starting write I/O failed\n");
-//             exit(1);
-//         }
-        
-//         while (!sequence.is_completed) {
-//             spdk_nvme_qpair_process_completions(ns_entry->qpair, 0);
-//         }
-// 		spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
-// 	}
-// }
+		uint32_t max_xfer_sector = spdk_nvme_ctrlr_get_max_xfer_size(ns_entry->ctrlr) / spdk_nvme_ns_get_sector_size(ns_entry->ns);
+		
+		time_t start_time, end_time;
+		start_time = clock();
+		while (current_sector < end_sector)
+		{
+			size_t sz;
 
-static void spdk_read(uint64_t lba_start, uint32_t lba_count, size_t buffer_sz, uint64_t qdepth)
+			// printf("Sector current: %lu\n", current_sector);
+			ns_entry->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_entry->ctrlr, NULL, 0);
+			if (ns_entry->qpair == NULL) {
+				printf("ERROR: spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
+				exit(1);
+			}
+			sequence.using_cmb_io = 1;
+			sequence.buf = spdk_nvme_ctrlr_map_cmb(ns_entry->ctrlr, &sz);
+			sequence.buffer_sz = sz;
+			
+			uint32_t looping_sector = (end_sector - current_sector) > max_xfer_sector ? max_xfer_sector : (end_sector - current_sector);
+			size_t seq_buffer_size = pow(2, ceil(log2(looping_sector * spdk_nvme_ns_get_sector_size(ns_entry->ns))));
+			
+			if (sequence.buf == NULL || sz < seq_buffer_size) {
+				sequence.using_cmb_io = 0;
+				sequence.buf = spdk_malloc(seq_buffer_size, seq_buffer_size, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+				sequence.buffer_sz = seq_buffer_size;
+			}
+			if (sequence.buf == NULL) {
+				printf("ERROR: buffer allocation failed\n");
+				exit(1);
+
+			}
+			// if (sequence.using_cmb_io) {
+			// 	printf("INFO: using controller memory buffer for IO\n");
+			// } else {
+			// 	printf("INFO: using host memory buffer for IO\n");
+			// }
+			sequence.is_completed = 0;
+			sequence.ns_entry = ns_entry;
+			if (spdk_nvme_ns_get_csi(ns_entry->ns) == SPDK_NVME_CSI_ZNS) {
+				reset_zone_and_wait_for_completion(&sequence);
+			}
+
+			snprintf(sequence.buf, seq_buffer_size,"%d", *buffer);
+			
+
+			// printf("Reading sector: %u\n", looping_sector);	
+			rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, sequence.buf,
+                    current_sector, looping_sector, write_complete, &sequence, 0);
+
+			if (rc != 0) {
+				fprintf(stderr, "ERROR: starting read I/O failed\n");
+				spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
+				return;
+			}
+		
+			current_sector += looping_sector;
+
+			printf("Sector current: %lu\n", current_sector);
+			// current_buffer = (void *)((uintptr_t)current_buffer + looping_sector * spdk_nvme_ns_get_sector_size(ns_entry->ns));
+
+			while (!sequence.is_completed) {
+				spdk_nvme_qpair_process_completions(ns_entry->qpair, 0);
+			}
+        	spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
+
+		}
+		end_time = clock();
+		printf("Time: %.10f sec\n", ((double)end_time-start_time)/CLOCKS_PER_SEC);
+		// sequence.buf = current_buffer;
+    }
+}
+
+void spdk_read(	
+	uint64_t 							user_sector_start,
+	uint64_t 							user_sector_count,
+	size_t 								user_buffer_size
+)
 {
     struct ns_entry 					*ns_entry;
     struct sequence 					sequence;
     int 								rc;
-    size_t 								sz;
+	
 
     TAILQ_FOREACH(ns_entry, &g_namespaces, link) {
-        ns_entry->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_entry->ctrlr, NULL, 0);
-        if (ns_entry->qpair == NULL) {
-            fprintf(stderr, "ERROR: spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
-            return;
-        }
+		uint64_t current_sector = user_sector_start;		
+		uint64_t end_sector = user_sector_start + user_sector_count;
 
-        sequence.using_cmb_io = 1;
-        sequence.buf = spdk_nvme_ctrlr_map_cmb(ns_entry->ctrlr, &sz);
-        if (sequence.buf == NULL || sz < buffer_sz) {
-            sequence.using_cmb_io = 0;
-            sequence.buf = spdk_zmalloc(buffer_sz, buffer_sz, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-        }
-        if (sequence.buf == NULL) {
-            fprintf(stderr, "ERROR: buffer allocation failed\n");
-            spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
-            return;
-        }
+		uint32_t max_xfer_sector = spdk_nvme_ctrlr_get_max_xfer_size(ns_entry->ctrlr) / spdk_nvme_ns_get_sector_size(ns_entry->ns);
+		
+		time_t start_time, end_time;
+		start_time = clock();
+		while (current_sector < end_sector)
+		{
+			size_t sz;
 
-        printf("INFO: Using %s memory buffer for I/O\n", sequence.using_cmb_io ? "controller" : "host");
+			// printf("Sector current: %lu\n", current_sector);
+			ns_entry->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_entry->ctrlr, NULL, 0);
+			if (ns_entry->qpair == NULL) {
+				printf("ERROR: spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
+				exit(1);
+			}
+			sequence.using_cmb_io = 1;
+			sequence.buf = spdk_nvme_ctrlr_map_cmb(ns_entry->ctrlr, &sz);
+			sequence.buffer_sz = sz;
+			uint32_t looping_sector = (end_sector - current_sector) > max_xfer_sector ? max_xfer_sector : (end_sector - current_sector);
+			size_t seq_buffer_size = pow(2, ceil(log2(looping_sector * spdk_nvme_ns_get_sector_size(ns_entry->ns))));
+			if (sequence.buf == NULL || sz < seq_buffer_size) {
+				sequence.using_cmb_io = 0;
+				sequence.buf = spdk_zmalloc(seq_buffer_size, seq_buffer_size, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+				sequence.buffer_sz = seq_buffer_size;
+			}
+			if (sequence.buf == NULL) {
+				printf("ERROR: buffer allocation failed\n");
+				exit(1);
 
-        sequence.is_completed = 0;
-        sequence.ns_entry = ns_entry;
+			}
+			// if (sequence.using_cmb_io) {
+			// 	printf("INFO: using controller memory buffer for IO\n");
+			// } else {
+			// 	printf("INFO: using host memory buffer for IO\n");
+			// }
+			sequence.is_completed = 0;
+			sequence.ns_entry = ns_entry;
+			if (spdk_nvme_ns_get_csi(ns_entry->ns) == SPDK_NVME_CSI_ZNS) {
+				reset_zone_and_wait_for_completion(&sequence);
+			}
 
-        if (spdk_nvme_ns_get_csi(ns_entry->ns) == SPDK_NVME_CSI_ZNS) {
-            reset_zone_and_wait_for_completion(&sequence);
-        }
+			// printf("Reading sector: %u\n", looping_sector);	
+			rc = spdk_nvme_ns_cmd_read(ns_entry->ns, ns_entry->qpair, sequence.buf,
+                    current_sector, looping_sector, read_complete, &sequence, 0);
 
-        rc = spdk_nvme_ns_cmd_read(ns_entry->ns, ns_entry->qpair, sequence.buf,
-                    lba_start, lba_count, read_complete, &sequence, 0);
+			if (rc != 0) {
+				fprintf(stderr, "ERROR: starting read I/O failed\n");
+				spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
+				return;
+			}
+		
+			current_sector += looping_sector;
 
-        if (rc != 0) {
-            fprintf(stderr, "ERROR: starting read I/O failed\n");
-            spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
-            exit(1);
-        }
+			// printf("Sector current: %lu\n", current_sector);
+			// current_buffer = (void *)((uintptr_t)current_buffer + looping_sector * spdk_nvme_ns_get_sector_size(ns_entry->ns));
 
-        while (!sequence.is_completed) {
-            spdk_nvme_qpair_process_completions(ns_entry->qpair, 0);
-        }
+			while (!sequence.is_completed) {
+				spdk_nvme_qpair_process_completions(ns_entry->qpair, 0);
+			}
+        	spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
 
-        spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
+		}
+		end_time = clock();
+		printf("Time: %.10f sec\n", ((double)end_time-start_time)/CLOCKS_PER_SEC);
+		// sequence.buf = current_buffer;
+		// spdk_free(current_buffer);
     }
 }
 
+int main_loop(void) {
+	struct ns_entry 					*ns_entry;
+	int 								user_pattern = -1;
+	int									op = -1;
+	uint64_t 							user_sector_start;
+	uint64_t 							user_sector_count;
+	size_t 								user_buffer_size;
 
-int pos_int_input(void) {
-    int num;
-    char buffer[100];
+	TAILQ_FOREACH(ns_entry, &g_namespaces, link) {
+		uint64_t sys_sector_count = spdk_nvme_ns_get_num_sectors(ns_entry->ns);		
+		uint32_t sys_sector_size = spdk_nvme_ns_get_sector_size(ns_entry->ns);
 
-    if (fgets(buffer, sizeof(buffer), stdin) != NULL) {
-        char *endptr;
-        num = strtol(buffer, &endptr, 10);
-        if (*endptr == '\0' || *endptr == '\n') {
-            return num;
-        } else {
-            return -1;
-        }
-    } else {
-        return -1;
-    }
-}
-
-uint64_t llu_input(void) {
-	uint64_t num;
-	char buffer[100];
-
-	if (fgets(buffer, sizeof(buffer), stdin) != NULL) {
-		char *endptr;
-		num = strtoull(buffer, &endptr, 10);
-		if (*endptr == '\0' || *endptr == '\n') {
-			return num;
-		} else {
-			return -1;
+		printf("Max transfer: %u\n", spdk_nvme_ctrlr_get_max_xfer_size(ns_entry->ctrlr));
+		print_info(ns_entry->ns);
+		printf("...\n");
+		
+		/* pattern */
+		while (true)
+		{
+			printf("%sChoose the operation among the following...\n", KNRM);
+			printf("0: Write\n");
+			printf("1: Read\n");
+			printf("Operation: ");
+			op = pos_int_input();
+			
+			if (op == 0) {
+				int patt = sel_pattern();
+				if (patt == 3) {
+					continue;
+				}
+				else {
+					user_pattern = (int)patt;
+					break;
+				}
+			}
+			else if (op == 1) {
+				user_pattern = -1;
+				break;
+			}
+			else
+			{
+				printf("%sInvalid operation\n", KRED);
+			}
 		}
-	} else {
-		return -1;
+
+		/* start */
+		while (true)
+		{
+			if (user_pattern == -1) {
+				printf("%sStart reading at sector: ", KNRM);
+			} else {
+				printf("%sStart writing at sector: ", KNRM);
+			}
+
+			uint64_t start = llu_input();
+			if ((int)start == -1) {
+				printf("%sInvalid start\n", KRED);
+				continue;
+			}
+			if (start > sys_sector_count) {
+				printf("%sStart sector exceeds the SSD size\n", KRED);
+				continue;
+			} else {
+				user_sector_start = start;
+				break;
+			}
+		}
+
+		/* length */
+		while (true)
+		{
+			if (user_pattern == -1) {
+				printf("%sReading length (aka sector count): ", KNRM);
+			} else {
+				printf("%sWriting length (aka sector count): ", KNRM);
+			}
+
+			uint64_t length = llu_input();
+			if ((int)length == -1) {
+				printf("%sInvalid length\n", KRED);
+				continue;
+			}
+			if (length > sys_sector_count - user_sector_start) {
+				printf("%sLength exceeds the SSD size\n", KRED);
+				continue;
+			} else {
+				user_sector_count = length;
+				user_buffer_size = length * sys_sector_size;
+				printf("Buffer size: %lu\n", user_buffer_size);
+				break;
+			}
+		}
+			
+		// printf("How many queues depth do you want to use?\n");
+		// rt = scanf("%lu\n", qdepth);
+
+		printf("-----------------------------------\n");
+		printf("LBA start: %lu\n", user_sector_start);
+		printf("LBA count: %lu\n", user_sector_count);
+		printf("LBA end  : %lu\n", user_sector_start + user_sector_count);
+
+		time_t start_time, end_time;
+		if (user_pattern == -1)
+		{
+			spdk_read(user_sector_start, user_sector_count, user_buffer_size);
+		} 
+		else
+		{
+			spdk_write(user_sector_start, user_sector_count, user_buffer_size, user_pattern);
+		}
+		printf("...\n");
 	}
-}
-
-int sel_pattern(void) {
-	int patt = -1;
-	while (patt == -1)
-	{
-		printf("Choose the pattern to write among the following...\n");
-		printf("0: Fill zeroes\n");
-		printf("1: Fill ones\n");
-		printf("2: Incremental\n");
-		printf("3: Back\n");
-		printf("Pattern: ");
-		patt = pos_int_input();
-		if (patt == 3) {
-			return 3;
-			break;
-		}
-		else if (patt < 0 || patt > 2) {
-			printf("%sInvalid pattern\n", KRED);
-			continue;
-		}
-		return patt;
-		break;
-	}
+	return 0;
 }
 
 int main(int argc, char **argv)
 {
+	// int rc, user_pattern = -1, op = -1, patt = -1;
 	int rc;
-	int op = -1, patt = -1;
 	struct spdk_env_opts opts;
-	uint64_t start=0, length=1, qdepth;
+	// uint64_t start=0, length=1, qdepth;
+	// static uint64_t user_sector_start, user_sector_count, user_qdepth;
+	// static size_t user_buffer_size = 512 * 1024;
 	// int NUM_THREADS = 4;
     // struct spdk_thread *threads[NUM_THREADS];
     // int thread_ids[NUM_THREADS];
@@ -582,113 +612,15 @@ int main(int argc, char **argv)
 	printf("SPDK Initialization complete.\n");
 
 	/* application */
-	while (true)
-	{
-		printf("%sChoose the operation among the following...\n", KNRM);
-		printf("0: Write\n");
-		printf("1: Read\n");
-		printf("Operation: ");
-		op = pos_int_input();
-		
-		if (op == 0) {
-			patt = sel_pattern();
-			if (patt == 3) {
-				continue;
-			}
-			else {
-				user_pattern = patt;
-				break;
-			}
-		}
-		else if (op == 1) {
-			user_pattern = -1;
-			break;
-		}
-		else
-		{
-			printf("%sInvalid operation\n", KRED);
-		}
-	}
-	
-	while (true)
-	{
-		if (user_pattern == -1) {
-			printf("%sStart reading at sector: ", KNRM);
-		} else {
-			printf("%sStart writing at sector: ", KNRM);
-		}
+	main_loop();
 
-		start = llu_input();
-		if ((int)start == -1) {
-			printf("%sInvalid start\n", KRED);
-			continue;
-		}
-		if (start > max_sector_count) {
-			printf("%sStart sector exceeds the SSD size\n", KRED);
-			continue;
-		} else {
-			user_sector_start = start;
-			break;
-		}
-	}
-
-	while (true)
-	{
-		if ((int)user_pattern == -1) {
-			printf("%sReading length (aka sector count): ", KNRM);
-		} else {
-			printf("%sWriting length (aka sector count): ", KNRM);
-		}
-
-		length = llu_input();
-		if ((int)length == -1) {
-			printf("%sInvalid length\n", KRED);
-			continue;
-		}
-		if (length > max_sector_count - user_sector_start) {
-			printf("%sLength exceeds the SSD size\n", KRED);
-			continue;
-		} else if (length > 4294967295) {
-			printf("%sLength exceeds the maximum size\n", KRED);
-			continue;
-		} else {
-			user_sector_count = length;
-			user_buffer_size = length * 512;
-			break;
-		}
-	}
-
-		
-	// printf("How many queues depth do you want to use?\n");
-	// rt = scanf("%lu\n", qdepth);
-
-	time_t start_time, end_time;
-	if ((int)user_pattern == -1)
-	{
-		printf("Start reading...\n");
-		printf("LBA start: %lu\n", user_sector_start);
-		printf("LBA count: %lu\n", user_sector_count);
-		start_time = clock();
-		spdk_read(user_sector_start, user_sector_count, user_buffer_size, user_qdepth);
-		end_time = clock();
-
-		printf("Time: %.10f sec\n", ((double)end_time-start_time)/CLOCKS_PER_SEC);
-	} else
-	{
-		start_time = clock();
-		// spdk_write();
-		end_time = clock();
-
-		printf("Time: %lu sec\n", (end_time-start_time)/CLOCKS_PER_SEC);
-	}
-
-    cleanup();
+	cleanup();
 	if (g_vmd) {
 		spdk_vmd_fini();
 	}
 
-exit:
-	cleanup();
-	spdk_env_fini();
-	return rc;
+	exit:
+		cleanup();
+		spdk_env_fini();
+		return rc;
 }

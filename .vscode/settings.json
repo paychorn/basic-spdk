@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "spdk_nvme.h": "c",
+        "cmath": "c"
+    }
+}

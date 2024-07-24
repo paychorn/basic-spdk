@@ -1,3 +1,5 @@
+#define KNRM  "\x1B[0m"
+#define KRED  "\x1B[31m"
 
 struct ctrlr_entry 
 {
@@ -24,24 +26,71 @@ struct sequence {
 	int		    is_completed;
 };
 
-void reset_zone_complete(void *arg, const struct spdk_nvme_cpl *completion);
-void reset_zone_and_wait_for_completion(struct sequence *sequence);
-void get_info(struct spdk_nvme_ns *ns);
-uint64_t get_lba_current(uint64_t lba_start, size_t buffer_sz);
-void usage(const char *program_name);
-int parse_args(int argc, char **argv, struct spdk_env_opts *env_opts);
-void register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns);
-bool probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid, struct spdk_nvme_ctrlr_opts *opts);
-void attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid, struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_ctrlr_opts *opts);
-void cleanup(void);
-void read_complete(void *arg, const struct spdk_nvme_cpl *completion);
-void write_complete(void *arg, const struct spdk_nvme_cpl *completion);
-int pos_int_input(void);
-int sel_pattern(void);
-uint64_t llu_input(void);
+/* spdk_nvme*/
+/** provided **/
+// void reset_zone_and_wait_for_completion(struct sequence *sequence);
+// void reset_zone_complete(void *arg, const struct spdk_nvme_cpl *completion);
+// void usage(const char *program_name);
 
+// /** added **/
+// void print_info(struct spdk_nvme_ns *ns);
+// int pos_int_input(void);
+// uint64_t llu_input(void);
+// int sel_pattern(void);
+// uint64_t get_lba_current(
+// 	uint64_t 							lba_start, 
+// 	size_t 								buffer_sz, 
+// 	uint64_t 							lba_c_out
+// );
+// struct sequence sequence_setup(
+// 	size_t 								seq_buffer_size,
+// 	struct ns_entry 					*ns_entry,
+// 	struct sequence 					sequence
+// );
+// /*************************************************************************/
 
+// /* spdk_test */
+// /** provided **/
+// int parse_args(
+// 	int 								argc, 
+// 	char 								**argv, 
+// 	struct spdk_env_opts 				*env_opts);
+// void register_ns(
+// 	struct spdk_nvme_ctrlr 				*ctrlr, 
+// 	struct spdk_nvme_ns 				*ns);
+// bool probe_cb(
+// 	void 								*cb_ctx, 
+// 	const struct spdk_nvme_transport_id *trid, 
+// 	struct spdk_nvme_ctrlr_opts 		*opts);
+// void attach_cb(
+// 	void 								*cb_ctx, 
+// 	const struct spdk_nvme_transport_id *trid, 
+// 	struct spdk_nvme_ctrlr 				*ctrlr, 
+// 	const struct spdk_nvme_ctrlr_opts 	*opts);
+// void read_complete(
+// 	void 								*arg, 
+// 	const struct spdk_nvme_cpl 			*completion);
+// void write_complete(
+// 	void 								*arg, 
+// 	const struct spdk_nvme_cpl 			*completion);
+// void cleanup(void);
 
+// /** added **/
+
+// void spdk_read(	
+// 	uint64_t 							user_sector_start,
+// 	uint64_t 							user_sector_count,
+// 	size_t 								user_buffer_size
+// );		
+// void spdk_write(
+// 	uint64_t 							user_sector_start,
+// 	uint64_t 							user_sector_count,
+// 	size_t 								seq_buffer_size,
+// 	size_t 								*buffer
+// );
+// int main_loop(void);
+// int main(int argc, char **argv);
+/*************************************************************************/
 
 
 // int random_lba_start(uint64_t MEM_SIZE, uint64_t LBA_SIZE) {
