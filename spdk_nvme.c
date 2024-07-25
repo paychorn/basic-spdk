@@ -105,28 +105,50 @@ uint64_t llu_input(void) {
 	}
 }
 
+int sel_operation(void) {
+	int op = -1;
+	while (true)
+	{
+		printf("%sChoose the operation among the following...\n", KNRM);
+		printf("0: Write\n");
+		printf("1: Read\n");
+		printf("Operation: ");
+		op = pos_int_input();
+
+		if (op == 0 || op == 1) {
+			break;
+		}
+		else {
+			printf("%sInvalid operation\n", KRED);
+			continue;
+		}
+	}
+	return op;
+}
+
 int sel_pattern(void) {
 	int patt = -1;
-	while (patt == -1)
+	while (true)
 	{
 		printf("Choose the pattern to write among the following...\n");
 		printf("0: Fill zeroes\n");
 		printf("1: Fill ones\n");
 		printf("2: Incremental\n");
-		printf("3: Back\n");
+		printf("3: Without pattern\n");
+		// printf("4: Back\n");
 		printf("Pattern: ");
 		patt = pos_int_input();
-		if (patt == 3) {
-			return 3;
-			break;
-		}
-		else if (patt < 0 || patt > 2) {
+		// if (patt == 4) {
+		// 	operation();
+
+		// }
+		if (patt < 0 || patt > 3) {
 			printf("%sInvalid pattern\n", KRED);
 			continue;
 		}
 		break;
 	}
-   	return patt;
+	return patt;
 }
 
 uint64_t get_lba_current(uint64_t lba_start, size_t buffer_sz, uint64_t lba_c_out) {

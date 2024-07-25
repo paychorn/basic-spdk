@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "spdk_nvme.h": "c",
-        "cmath": "c"
+        "cmath": "c",
+        "cstdint": "c"
     }
 }

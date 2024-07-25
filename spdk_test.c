@@ -222,14 +222,46 @@ void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 		exit(1);
 	}
 
-	/*
-	 * The read I/O has completed.  Print the contents of the
-	 *  buffer, free the buffer, then mark the sequence as
-	 *  completed.  This will trigger the hello_world() function
-	 *  to exit its polling loop.
-	 */
-	// printf("read: %s\n", sequence->buf);
+	printf("++++++++++++++++++++++++++++++\n");
+
+	if (sequence->user_pattern == 3) {
+		spdk_free(sequence->buf);
+		return ;
+	}
+	else if (sequence->user_pattern == 0 || sequence->user_pattern == 1) {
+		uint32_t *buf = sequence->buf;
+		while (buf != sequence->buf + sequence->buffer_sz && buf != NULL) {
+			printf("%llu ", *buf);
+			buf++;
+		}
+		//  (uin i = 0; i < sequence->buf; i++) {
+		// 	printf("%lu ", (sequence->user_sector_start + i));
+		// 	printf("%d ", sequence->buf[sequence->user_sector_start+i]== 0x0000? 1 : 0);
+		// 	// printf("%u ", *(sequence->buf + i));
+		// 	// if (*(sequence->buf + i) != (uint32_t) sequence->user_pattern) {
+		// 	// 	printf("Verify failed at %d\n", *(sequence->buf  + i));
+		// 	// 	printf("The pattern should be %d but it's given %ls\n", sequence->user_pattern, (sequence->buf  + i));
+		// 	// 	break;
+		// 	// }
+		// }
+		printf("Verify success\n");
+	}
+	else if (sequence->user_pattern == 2) {
+		for (size_t i = 0; i < sequence->buffer_sz; i++) {
+			if (*(sequence->buf + i) != (sequence->user_sector_start * 512 % (1ULL<<32)) + i) {
+				printf("Verify failed at %ld\n", i);
+				printf("Should be %ld\n", (sequence->user_sector_start * 512 % 0b11111111111111111111111111111111) + i);
+				printf("The pattern is %d but it's given %u\n", sequence->user_pattern, *(sequence->buf + i));
+				break;
+			}
+		}
+		printf("\nVerify success\n");
+	}
+	else {
+		printf("Invalid pattern at %d\n", sequence->user_pattern);
+	}
 	spdk_free(sequence->buf);
+	return;
 }
 
 void write_complete(void *arg, const struct spdk_nvme_cpl *completion)
@@ -265,70 +297,60 @@ void write_complete(void *arg, const struct spdk_nvme_cpl *completion)
 void spdk_write(
 	uint64_t 							user_sector_start,
 	uint64_t 							user_sector_count,
-	size_t 								user_buffer_size,
-	int 								user_pattern
+	size_t								user_buffer_size,
+	int 								user_pattern,
+	uint32_t 							user_command_size,
+	uint64_t 							user_qdepth,
+	uint32_t 							max_xfer_sector
 )
 {
 	struct ns_entry 					*ns_entry;
-    struct sequence 					sequence;
-    int 								rc;
-	uint32_t 							buffer[user_buffer_size];
-	
+	struct sequence 					sequence;
+	int 								rc;
 
-	/* generate buffer as pattern 
-	 * 0: fill zeroes, 1: fill ones, 2: increment
-	 */
-	if (user_pattern == 2) {
-		for (size_t i = 0; i < user_buffer_size - 1; i++) {
-			buffer[i] = (user_sector_start + i);
-		}
-	}
-	else {
-		for (size_t i = 0; i < user_buffer_size - 1; i++) {
-			buffer[i] = (uint32_t)user_pattern;
-		}
-	}
-	buffer[user_buffer_size - 1] = '\0'; // Null-terminate the string for safety
+	TAILQ_FOREACH(ns_entry, &g_namespaces, link) {
+		size_t ptr = 0;
 
-	uint32_t *ptr = buffer;
-
-	for (size_t i = 0; i < user_buffer_size - 1; i++) {
-		printf("%d ", *(ptr + i));
-	}
-
-    TAILQ_FOREACH(ns_entry, &g_namespaces, link) {
 		uint64_t current_sector = user_sector_start;		
 		uint64_t end_sector = user_sector_start + user_sector_count;
 
-		uint32_t max_xfer_sector = spdk_nvme_ctrlr_get_max_xfer_size(ns_entry->ctrlr) / spdk_nvme_ns_get_sector_size(ns_entry->ns);
+		uint32_t looping_sector = user_command_size > 0 ? user_command_size : (end_sector - current_sector) > max_xfer_sector ? max_xfer_sector : (end_sector - current_sector);			
 		
+		size_t   seq_buffer_sz = pow(2, ceil(log2(looping_sector *512)));
+
 		time_t start_time, end_time;
 		start_time = clock();
+
 		while (current_sector < end_sector)
 		{
-			size_t sz;
-
 			// printf("Sector current: %lu\n", current_sector);
 			ns_entry->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_entry->ctrlr, NULL, 0);
 			if (ns_entry->qpair == NULL) {
 				printf("ERROR: spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
-				exit(1);
+				return;
 			}
+
+			size_t sz;
 			sequence.using_cmb_io = 1;
 			sequence.buf = spdk_nvme_ctrlr_map_cmb(ns_entry->ctrlr, &sz);
 			sequence.buffer_sz = sz;
 			
-			uint32_t looping_sector = (end_sector - current_sector) > max_xfer_sector ? max_xfer_sector : (end_sector - current_sector);
-			size_t seq_buffer_size = pow(2, ceil(log2(looping_sector * spdk_nvme_ns_get_sector_size(ns_entry->ns))));
-			
-			if (sequence.buf == NULL || sz < seq_buffer_size) {
+			looping_sector = (end_sector - current_sector) > max_xfer_sector ? max_xfer_sector : (end_sector - current_sector);			
+			seq_buffer_sz = pow(2, ceil(log2(looping_sector * spdk_nvme_ns_get_sector_size(ns_entry->ns))));
+
+			if (sequence.buf == NULL || sz < seq_buffer_sz) {
 				sequence.using_cmb_io = 0;
-				sequence.buf = spdk_malloc(seq_buffer_size, seq_buffer_size, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-				sequence.buffer_sz = seq_buffer_size;
+				if (user_pattern == 0) {
+					sequence.buf = spdk_zmalloc(seq_buffer_sz, seq_buffer_sz, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+				}
+				else {
+					sequence.buf = spdk_malloc(seq_buffer_sz, seq_buffer_sz, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+				}
+				sequence.buffer_sz = seq_buffer_sz;
 			}
 			if (sequence.buf == NULL) {
 				printf("ERROR: buffer allocation failed\n");
-				exit(1);
+				return;
 
 			}
 			// if (sequence.using_cmb_io) {
@@ -341,41 +363,54 @@ void spdk_write(
 			if (spdk_nvme_ns_get_csi(ns_entry->ns) == SPDK_NVME_CSI_ZNS) {
 				reset_zone_and_wait_for_completion(&sequence);
 			}
-
-			snprintf(sequence.buf, seq_buffer_size,"%d", *buffer);
 			
-
+			if (user_pattern == 0) {
+				memset(sequence.buf, 0, seq_buffer_sz);
+			}
+			else if (user_pattern == 1) {
+				memset(sequence.buf, 1, seq_buffer_sz);
+			}
+			else if (user_pattern == 2) {
+				printf("%llu", 1ULL << 32);
+				for (uint64_t i = 0; i < seq_buffer_sz; i++) {
+					*(sequence.buf + i) = (uint32_t)(current_sector * 512 % 1ULL << 32) + i;
+				}
+			}
+			
 			// printf("Reading sector: %u\n", looping_sector);	
 			rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, sequence.buf,
-                    current_sector, looping_sector, write_complete, &sequence, 0);
+					current_sector, /* lba start */
+					looping_sector, /* lba count */
+					write_complete, &sequence, 0);
 
 			if (rc != 0) {
 				fprintf(stderr, "ERROR: starting read I/O failed\n");
-				spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
 				return;
 			}
 		
-			current_sector += looping_sector;
-
-			printf("Sector current: %lu\n", current_sector);
-			// current_buffer = (void *)((uintptr_t)current_buffer + looping_sector * spdk_nvme_ns_get_sector_size(ns_entry->ns));
-
+			current_sector += (uint64_t)looping_sector;
+			ptr += seq_buffer_sz;
 			while (!sequence.is_completed) {
 				spdk_nvme_qpair_process_completions(ns_entry->qpair, 0);
 			}
-        	spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
+			spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
 
 		}
 		end_time = clock();
 		printf("Time: %.10f sec\n", ((double)end_time-start_time)/CLOCKS_PER_SEC);
 		// sequence.buf = current_buffer;
-    }
+	}
+
 }
 
 void spdk_read(	
 	uint64_t 							user_sector_start,
 	uint64_t 							user_sector_count,
-	size_t 								user_buffer_size
+	size_t								user_buffer_size,
+	int 								user_pattern,
+	uint32_t 							user_command_size,
+	uint64_t 							user_qdepth,
+	uint32_t 							max_xfer_sector
 )
 {
     struct ns_entry 					*ns_entry;
@@ -404,8 +439,10 @@ void spdk_read(
 			sequence.using_cmb_io = 1;
 			sequence.buf = spdk_nvme_ctrlr_map_cmb(ns_entry->ctrlr, &sz);
 			sequence.buffer_sz = sz;
-			uint32_t looping_sector = (end_sector - current_sector) > max_xfer_sector ? max_xfer_sector : (end_sector - current_sector);
+			
+			uint32_t looping_sector = user_command_size > 0 ?  user_command_size : (end_sector - current_sector) > max_xfer_sector ? max_xfer_sector : (end_sector - current_sector);
 			size_t seq_buffer_size = pow(2, ceil(log2(looping_sector * spdk_nvme_ns_get_sector_size(ns_entry->ns))));
+			printf("Buffer size: %lu\n", seq_buffer_size);
 			if (sequence.buf == NULL || sz < seq_buffer_size) {
 				sequence.using_cmb_io = 0;
 				sequence.buf = spdk_zmalloc(seq_buffer_size, seq_buffer_size, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
@@ -413,7 +450,7 @@ void spdk_read(
 			}
 			if (sequence.buf == NULL) {
 				printf("ERROR: buffer allocation failed\n");
-				exit(1);
+				return;
 
 			}
 			// if (sequence.using_cmb_io) {
@@ -427,10 +464,14 @@ void spdk_read(
 				reset_zone_and_wait_for_completion(&sequence);
 			}
 
+			sequence.user_pattern = user_pattern;
+			sequence.user_sector_start = current_sector;
+
+
 			// printf("Reading sector: %u\n", looping_sector);	
 			rc = spdk_nvme_ns_cmd_read(ns_entry->ns, ns_entry->qpair, sequence.buf,
-                    current_sector, looping_sector, read_complete, &sequence, 0);
-
+				current_sector, looping_sector, read_complete, &sequence, 0);
+			
 			if (rc != 0) {
 				fprintf(stderr, "ERROR: starting read I/O failed\n");
 				spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
@@ -457,10 +498,12 @@ void spdk_read(
 
 int main_loop(void) {
 	struct ns_entry 					*ns_entry;
-	int 								user_pattern = -1;
-	int									op = -1;
+	int 								user_pattern 				= -1;
+	int									user_op 					= -1;
 	uint64_t 							user_sector_start;
 	uint64_t 							user_sector_count;
+	uint32_t 							user_command_size 			= 0;
+	uint64_t 							user_qdepth 				= 0;
 	size_t 								user_buffer_size;
 
 	TAILQ_FOREACH(ns_entry, &g_namespaces, link) {
@@ -470,47 +513,17 @@ int main_loop(void) {
 		printf("Max transfer: %u\n", spdk_nvme_ctrlr_get_max_xfer_size(ns_entry->ctrlr));
 		print_info(ns_entry->ns);
 		printf("...\n");
-		
-		/* pattern */
-		while (true)
-		{
-			printf("%sChoose the operation among the following...\n", KNRM);
-			printf("0: Write\n");
-			printf("1: Read\n");
-			printf("Operation: ");
-			op = pos_int_input();
-			
-			if (op == 0) {
-				int patt = sel_pattern();
-				if (patt == 3) {
-					continue;
-				}
-				else {
-					user_pattern = (int)patt;
-					break;
-				}
-			}
-			else if (op == 1) {
-				user_pattern = -1;
-				break;
-			}
-			else
-			{
-				printf("%sInvalid operation\n", KRED);
-			}
-		}
+
+		user_op = sel_operation ();
+		user_pattern = sel_pattern();
 
 		/* start */
 		while (true)
 		{
-			if (user_pattern == -1) {
-				printf("%sStart reading at sector: ", KNRM);
-			} else {
-				printf("%sStart writing at sector: ", KNRM);
-			}
-
+			printf("%sStart %sing sector: ", KNRM, user_op == 1 ? "read" : "writ");
+		
 			uint64_t start = llu_input();
-			if ((int)start == -1) {
+			if ((int)start < 0) {
 				printf("%sInvalid start\n", KRED);
 				continue;
 			}
@@ -526,14 +539,10 @@ int main_loop(void) {
 		/* length */
 		while (true)
 		{
-			if (user_pattern == -1) {
-				printf("%sReading length (aka sector count): ", KNRM);
-			} else {
-				printf("%sWriting length (aka sector count): ", KNRM);
-			}
+			printf("%s%sing sector length: ", KNRM, user_op ? "Read" : "Writ");
 
 			uint64_t length = llu_input();
-			if ((int)length == -1) {
+			if ((int)length < 0) {
 				printf("%sInvalid length\n", KRED);
 				continue;
 			}
@@ -547,23 +556,62 @@ int main_loop(void) {
 				break;
 			}
 		}
-			
-		// printf("How many queues depth do you want to use?\n");
-		// rt = scanf("%lu\n", qdepth);
 
+		/* command size*/
+		while (true)
+		{
+			printf("%s%sing command size: ", KNRM, user_op ? "Read" : "Writ");
+
+			uint64_t cmb_sz = llu_input();
+			if ((int)cmb_sz < 0) {
+				printf("%sInvalid command size\n", KRED);
+				continue;
+			}
+			if (cmb_sz > spdk_nvme_ctrlr_get_max_xfer_size(ns_entry->ctrlr)) {
+				printf("%sCommand size is unavalible\n", KRED);
+				break;
+			}
+			else {
+				user_command_size = cmb_sz;
+				printf("Command size: %u\n", user_command_size);
+				break;
+			}
+		}
+
+		while (true)
+		{
+			printf("%s%sing queue depth: ", KNRM, user_op ? "Read" : "Writ");
+
+			uint64_t q_depth = llu_input();
+			if ((int)q_depth < 0) {
+				printf("%sInvalid queue depth\n", KRED);
+				continue;
+			}
+			if (q_depth > spdk_nvme_ctrlr_get_max_xfer_size(ns_entry->ctrlr)) {
+				printf("%sQueue depth is unavalible\n", KRED);
+				break;
+			}
+			else {
+				user_qdepth = q_depth;
+				printf("Queue depth: %lu\n", user_qdepth);
+				break;
+			}
+		}
+		
 		printf("-----------------------------------\n");
 		printf("LBA start: %lu\n", user_sector_start);
 		printf("LBA count: %lu\n", user_sector_count);
 		printf("LBA end  : %lu\n", user_sector_start + user_sector_count);
 
-		time_t start_time, end_time;
-		if (user_pattern == -1)
+		if (user_op == 1)
 		{
-			spdk_read(user_sector_start, user_sector_count, user_buffer_size);
+			printf("Reading...\n");
+			spdk_read(user_sector_start, user_sector_count, user_buffer_size, user_pattern, user_command_size, user_qdepth, spdk_nvme_ctrlr_get_max_xfer_size(ns_entry->ctrlr) / spdk_nvme_ns_get_sector_size(ns_entry->ns));
 		} 
-		else
+		else if (user_op == 0)
 		{
-			spdk_write(user_sector_start, user_sector_count, user_buffer_size, user_pattern);
+			printf("Writing...\n");	
+			spdk_write(user_sector_start, user_sector_count, user_buffer_size, user_pattern, user_command_size, user_qdepth, spdk_nvme_ctrlr_get_max_xfer_size(ns_entry->ctrlr) / spdk_nvme_ns_get_sector_size(ns_entry->ns));
 		}
 		printf("...\n");
 	}
