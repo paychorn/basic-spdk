@@ -26,6 +26,7 @@ struct sequence {
 	int		    	is_completed;
 	int 			user_pattern;
 	uint64_t 		user_sector_start;
+	int			    is_read_verify_success;
 };
 
 /* spdk_nvme*/

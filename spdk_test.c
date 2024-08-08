@@ -202,6 +202,39 @@ void attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid, struct s
 	}
 }
 
+static void verify_pattern(struct sequence *seq)   {
+	if (seq->user_pattern == 0) {
+		for (size_t i = 0; i < sizeof(seq->buf); i++) {
+			if (seq->buf[i] != 0) {
+				printf("Data doesn't match the pattern zeros\n");
+				seq->is_read_verify_success = 0;
+				return;
+			}
+		}
+		seq->is_read_verify_success = 1;
+	}
+	else if (seq->user_pattern == 1) {
+		for (size_t i = 0; i < sizeof(seq->buf); i++) {
+			if (seq->buf[i] != (uint32_t)1) {
+				printf("Data doesn't match the pattern ones get %u instead of 1\n", seq->buf[i]);
+				seq->is_read_verify_success = 0;
+				return;
+			}
+		}
+		seq->is_read_verify_success = 1;
+	}
+	else if (seq->user_pattern == 2) {
+		for (size_t i = 0; i < sizeof(seq->buf); i++) {
+			if (seq->buf[i] != (uint32_t)(seq->user_sector_start + i)) {
+				printf("Data doesn't match the pattern increment\n");
+				seq->is_read_verify_success = 0;
+				return;
+			}
+		}
+		seq->is_read_verify_success = 1;
+	}
+	return;
+}
 
 void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 {
@@ -210,10 +243,6 @@ void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 	/* Assume the I/O was successful */
 	sequence->is_completed = 1;
 
-	// /* See if an error occurred. If so, display information
-	//  * about it, and set completion value so that I/O
-	//  * caller is aware that an error occurred.
-	//  */
 	if (spdk_nvme_cpl_is_error(completion)) {
 		spdk_nvme_qpair_print_completion(sequence->ns_entry->qpair, (struct spdk_nvme_cpl *)completion);
 		fprintf(stderr, "I/O error status: %s\n", spdk_nvme_cpl_get_status_string(&completion->status));
@@ -221,45 +250,7 @@ void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 		sequence->is_completed = 2;
 		exit(1);
 	}
-
-	printf("++++++++++++++++++++++++++++++\n");
-
-	if (sequence->user_pattern == 3) {
-		spdk_free(sequence->buf);
-		return ;
-	}
-	else if (sequence->user_pattern == 0 || sequence->user_pattern == 1) {
-		uint32_t *buf = sequence->buf;
-		while (buf != sequence->buf + sequence->buffer_sz && buf != NULL) {
-			printf("%llu ", *buf);
-			buf++;
-		}
-		//  (uin i = 0; i < sequence->buf; i++) {
-		// 	printf("%lu ", (sequence->user_sector_start + i));
-		// 	printf("%d ", sequence->buf[sequence->user_sector_start+i]== 0x0000? 1 : 0);
-		// 	// printf("%u ", *(sequence->buf + i));
-		// 	// if (*(sequence->buf + i) != (uint32_t) sequence->user_pattern) {
-		// 	// 	printf("Verify failed at %d\n", *(sequence->buf  + i));
-		// 	// 	printf("The pattern should be %d but it's given %ls\n", sequence->user_pattern, (sequence->buf  + i));
-		// 	// 	break;
-		// 	// }
-		// }
-		printf("Verify success\n");
-	}
-	else if (sequence->user_pattern == 2) {
-		for (size_t i = 0; i < sequence->buffer_sz; i++) {
-			if (*(sequence->buf + i) != (sequence->user_sector_start * 512 % (1ULL<<32)) + i) {
-				printf("Verify failed at %ld\n", i);
-				printf("Should be %ld\n", (sequence->user_sector_start * 512 % 0b11111111111111111111111111111111) + i);
-				printf("The pattern is %d but it's given %u\n", sequence->user_pattern, *(sequence->buf + i));
-				break;
-			}
-		}
-		printf("\nVerify success\n");
-	}
-	else {
-		printf("Invalid pattern at %d\n", sequence->user_pattern);
-	}
+	verify_pattern(sequence);
 	spdk_free(sequence->buf);
 	return;
 }
@@ -321,9 +312,21 @@ void spdk_write(
 		time_t start_time, end_time;
 		start_time = clock();
 
+		// if (user_pattern == 1) {
+		// 	for (uint64_t i = 0; i < seq_buffer_sz; i++) {
+		// 		*(buf + i) = (uint32_t)1;
+		// 	}
+		// }
+		// else if (user_pattern == 2) {
+		// 	for (uint64_t i = 0; i < sizeof(sequence.buf); i++) {
+		// 		*(sequence.buf + i) = (uint32_t) (current_sector + (i));
+		// printf("%u\n", *(sequence.buf + i));
+		// 	} 
+		// }
+
 		while (current_sector < end_sector)
 		{
-			// printf("Sector current: %lu\n", current_sector);
+			printf("Sector current: %lu\n", current_sector); // to check command size
 			ns_entry->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_entry->ctrlr, NULL, 0);
 			if (ns_entry->qpair == NULL) {
 				printf("ERROR: spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
@@ -344,7 +347,14 @@ void spdk_write(
 					sequence.buf = spdk_zmalloc(seq_buffer_sz, seq_buffer_sz, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
 				}
 				else {
-					sequence.buf = spdk_malloc(seq_buffer_sz, seq_buffer_sz, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+					uint32_t *buf = spdk_malloc(seq_buffer_sz, seq_buffer_sz, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+					if (user_pattern == 1) {
+						for (uint64_t i = 0; i < sizeof(buf); i++) {
+							*(buf + i) = (uint32_t)1;
+						}
+					}
+					
+					sequence.buf = buf;
 				}
 				sequence.buffer_sz = seq_buffer_sz;
 			}
@@ -359,22 +369,10 @@ void spdk_write(
 			// 	printf("INFO: using host memory buffer for IO\n");
 			// }
 			sequence.is_completed = 0;
+			sequence.is_read_verify_success = -1;
 			sequence.ns_entry = ns_entry;
 			if (spdk_nvme_ns_get_csi(ns_entry->ns) == SPDK_NVME_CSI_ZNS) {
 				reset_zone_and_wait_for_completion(&sequence);
-			}
-			
-			if (user_pattern == 0) {
-				memset(sequence.buf, 0, seq_buffer_sz);
-			}
-			else if (user_pattern == 1) {
-				memset(sequence.buf, 1, seq_buffer_sz);
-			}
-			else if (user_pattern == 2) {
-				printf("%llu", 1ULL << 32);
-				for (uint64_t i = 0; i < seq_buffer_sz; i++) {
-					*(sequence.buf + i) = (uint32_t)(current_sector * 512 % 1ULL << 32) + i;
-				}
 			}
 			
 			// printf("Reading sector: %u\n", looping_sector);	
@@ -389,7 +387,7 @@ void spdk_write(
 			}
 		
 			current_sector += (uint64_t)looping_sector;
-			ptr += seq_buffer_sz;
+			ptr += sizeof(sequence.buf);
 			while (!sequence.is_completed) {
 				spdk_nvme_qpair_process_completions(ns_entry->qpair, 0);
 			}
@@ -442,7 +440,7 @@ void spdk_read(
 			
 			uint32_t looping_sector = user_command_size > 0 ?  user_command_size : (end_sector - current_sector) > max_xfer_sector ? max_xfer_sector : (end_sector - current_sector);
 			size_t seq_buffer_size = pow(2, ceil(log2(looping_sector * spdk_nvme_ns_get_sector_size(ns_entry->ns))));
-			printf("Buffer size: %lu\n", seq_buffer_size);
+			// printf("Buffer size: %lu\n", seq_buffer_size);
 			if (sequence.buf == NULL || sz < seq_buffer_size) {
 				sequence.using_cmb_io = 0;
 				sequence.buf = spdk_zmalloc(seq_buffer_size, seq_buffer_size, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
@@ -459,6 +457,7 @@ void spdk_read(
 			// 	printf("INFO: using host memory buffer for IO\n");
 			// }
 			sequence.is_completed = 0;
+			sequence.is_read_verify_success = -1;
 			sequence.ns_entry = ns_entry;
 			if (spdk_nvme_ns_get_csi(ns_entry->ns) == SPDK_NVME_CSI_ZNS) {
 				reset_zone_and_wait_for_completion(&sequence);
@@ -488,6 +487,10 @@ void spdk_read(
 			}
         	spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
 
+			if (sequence.is_read_verify_success == 0) {
+				printf("Data verification failed\n");
+				break;
+			}
 		}
 		end_time = clock();
 		printf("Time: %.10f sec\n", ((double)end_time-start_time)/CLOCKS_PER_SEC);
@@ -507,7 +510,8 @@ int main_loop(void) {
 	size_t 								user_buffer_size;
 
 	TAILQ_FOREACH(ns_entry, &g_namespaces, link) {
-		uint64_t sys_sector_count = spdk_nvme_ns_get_num_sectors(ns_entry->ns);		
+		uint64_t sys_sector_count = spdk_nvme_ns_get_num_sectors(ns_entry->ns);
+		printf("Max sector size: %lu\n",sys_sector_count);		
 		uint32_t sys_sector_size = spdk_nvme_ns_get_sector_size(ns_entry->ns);
 
 		printf("Max transfer: %u\n", spdk_nvme_ctrlr_get_max_xfer_size(ns_entry->ctrlr));
@@ -567,8 +571,13 @@ int main_loop(void) {
 				printf("%sInvalid command size\n", KRED);
 				continue;
 			}
-			if (cmb_sz > spdk_nvme_ctrlr_get_max_xfer_size(ns_entry->ctrlr)) {
+			else if (cmb_sz > spdk_nvme_ctrlr_get_max_xfer_size(ns_entry->ctrlr)) {
 				printf("%sCommand size is unavalible\n", KRED);
+				break;
+			}
+			else if (cmb_sz == 0) {
+				user_command_size = 0;
+				printf("Command size cannot be 0 using %u instead\n", user_command_size);
 				break;
 			}
 			else {
